@@ -1,347 +1,425 @@
-/* Teaching Portal — unified release logic.
-   Role model, teacher path (Schedule -> Materials -> Share), honest integration
-   states, tax-inclusive billing with manual invoices, payment proof, branded PDF. */
+/* Teaching Portal v2 — client. No client-side role switching: the session and
+   every permission decision come from the server (/api/*). */
 (function () {
   'use strict';
 
-  var state = {
-    role: 'teacher',
-    view: 'dashboard',
-    data: JSON.parse(JSON.stringify(window.SEED)),
-    notice: ''
-  };
+  var state = { token: '', user: null, view: 'dashboard', notice: '' };
+  try {
+    state.token = sessionStorage.getItem('tp_token') || '';
+    state.user = JSON.parse(sessionStorage.getItem('tp_user') || 'null');
+  } catch (e) { state.user = null; }
 
-  var PERMS = {
-    admin:   ['dashboard', 'schedule', 'materials', 'share', 'billing', 'student'],
+  // Teacher workflow order is fixed server-side too: Schedule -> Materials -> Share.
+  var NAV = {
+    admin:   ['dashboard', 'schedule', 'materials', 'share', 'billing', 'users', 'audit', 'student'],
     staff:   ['dashboard', 'billing'],
     teacher: ['dashboard', 'schedule', 'materials', 'share'],
     student: ['student']
   };
-
-  // Canonical order guarantees the requested teacher workflow:
-  // Schedule -> Materials -> Share (fixes the prior Materials-before-Schedule nav).
-  var VIEW_ORDER = ['dashboard', 'schedule', 'materials', 'share', 'billing', 'student'];
-
   var LABELS = {
-    dashboard: 'حالة التكاملات',
-    schedule: 'جدولة الدروس',
-    materials: 'إدارة المواد',
-    share: 'المشاركة مع الطلاب',
-    billing: 'الفوترة',
-    student: 'عرض الطالب'
+    dashboard: 'حالة التكاملات', schedule: 'جدولة الدروس', materials: 'إدارة المواد',
+    share: 'المشاركة مع الطلاب', billing: 'الفوترة', users: 'إدارة المستخدمين',
+    audit: 'سجل التدقيق', student: 'عرض الطالب'
   };
 
-  function can(v) { return PERMS[state.role].indexOf(v) !== -1; }
   function esc(s) {
     return String(s == null ? '' : s)
       .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
   }
   function money(n) { return Number(n).toLocaleString('en-US'); }
-  function taxOf(inv) { return Math.round(inv.amountExTax * inv.taxRate); }
-  function totalOf(inv) { return inv.amountExTax + taxOf(inv); }
-  function courseTitle(id) {
-    var c = state.data.courses.filter(function (x) { return x.id === id; })[0];
-    return c ? c.title : id;
+
+  async function api(path, opts) {
+    opts = opts || {};
+    var headers = { 'Content-Type': 'application/json' };
+    if (state.token) headers.Authorization = 'Bearer ' + state.token;
+    var res = await fetch(path, {
+      method: opts.method || 'GET', headers: headers,
+      body: opts.body ? JSON.stringify(opts.body) : undefined
+    });
+    var data = null;
+    try { data = await res.json(); } catch (e) { data = null; }
+    if (res.status === 401) { clearSession(); renderLogin('انتهت الجلسة أو بيانات الدخول غير صالحة.'); throw new Error('unauthenticated'); }
+    if (!res.ok) throw new Error((data && data.error) || ('HTTP ' + res.status));
+    return data;
   }
-  function isStaleLink(m) { return state.data.staleLinks.indexOf(m.id) !== -1; }
-  function shareBadge(st) {
-    var map = {
-      'shared': ['ok', 'مُشاركة'],
-      'not-shared': ['off', 'غير مُشاركة'],
-      'missing': ['bad', 'مفقودة'],
-      'draft': ['warn', 'مسودة']
-    };
-    var m = map[st] || ['warn', st];
-    return '<span class="badge ' + m[0] + '">' + m[1] + '</span>';
+
+  function setSession(token, user) {
+    state.token = token; state.user = user;
+    sessionStorage.setItem('tp_token', token);
+    sessionStorage.setItem('tp_user', JSON.stringify(user));
   }
+  function clearSession() {
+    state.token = ''; state.user = null;
+    sessionStorage.removeItem('tp_token'); sessionStorage.removeItem('tp_user');
+  }
+  function allowed(v) { return state.user && NAV[state.user.role].indexOf(v) !== -1; }
+  function noticeHtml() { return state.notice ? '<p class="notice">' + esc(state.notice) + '</p>' : ''; }
+
+  function renderChrome() {
+    var ub = document.getElementById('userBox');
+    if (!state.user) { ub.innerHTML = ''; document.getElementById('mainNav').innerHTML = ''; return; }
+    ub.innerHTML = '<span>' + esc(state.user.name) + ' · ' + esc(state.user.id) + ' · <b>' + esc(state.user.role) + '</b></span>'
+      + ' <button class="ghost small" onclick="TP.logout()">خروج</button>';
+    document.getElementById('mainNav').innerHTML = NAV[state.user.role].map(function (v) {
+      return '<button class="nav-btn' + (state.view === v ? ' active' : '') + '" onclick="TP.go(\'' + v + '\')">' + LABELS[v] + '</button>';
+    }).join('');
+  }
+
+  function renderLogin(msg) {
+    renderChrome();
+    document.getElementById('app').innerHTML =
+      '<div class="card login-card"><h2>تسجيل الدخول</h2>'
+      + (msg ? '<p class="error">' + esc(msg) + '</p>' : '')
+      + '<label>معرّف المستخدم <input id="loginId" type="text" placeholder="USR-401"></label>'
+      + '<label>كلمة المرور <input id="loginPass" type="password"></label>'
+      + '<button onclick="TP.login()">دخول</button>'
+      + '<p class="muted">الحسابات الأولية موثّقة في README وdocs/reconciliation-report.md ويُطلب تغيير كلمات مرورها بعد أول دخول. لا تُنشأ أي حسابات تلقائيًا.</p></div>';
+  }
+
+  function showLoading() { document.getElementById('app').innerHTML = '<p class="muted">جارٍ التحميل…</p>'; }
 
   /* ---------- views ---------- */
 
-  function intCard(title, cfg, extra) {
-    var active = cfg.configured && cfg.liveTest;
-    var badge = active ? '<span class="badge ok">متصل ويعمل</span>'
-      : (cfg.status === 'unknown' ? '<span class="badge warn">غير مؤكد</span>'
-      : '<span class="badge off">غير متصل</span>');
-    return '<div class="card"><h3>' + title + ' ' + badge + '</h3>'
-      + '<p class="muted">' + esc(cfg.note) + '</p>'
-      + '<p class="muted">المفتاح <code>' + esc(cfg.key) + '</code>: '
-      + (cfg.configured ? 'مُكوَّن' : 'غير موجود')
-      + ' · اختبار مباشر: ' + (cfg.liveTest ? 'ناجح' : 'لم يُجرَ') + '</p>'
-      + (extra || '') + '</div>';
+  function badge(status) {
+    if (status === 'connected') return '<span class="badge ok">متصل ويعمل (اختبار مباشر ناجح)</span>';
+    return '<span class="badge off">غير متصل</span>';
   }
 
-  function viewDashboard() {
-    var ig = state.data.integrations;
-    return '<h2>حالة التكاملات</h2>'
-      + '<p class="rule">القاعدة المعتمدة: لا تظهر أي ميزة تكامل كمتاحة إلا إذا وُجد مفتاح مُكوَّن <b>و</b> نجح اختبار مباشر. '
-      + 'حاليًا <b>لا يوجد أي تكامل مفعّل</b>، لذلك تظهر جميعها كغير متصلة/غير مؤكدة وتُعطَّل الأزرار المرتبطة بها.</p>'
-      + intCard('الاجتماعات (Meetings)', ig.meetings,
-          '<p>إنشاء الاجتماعات والانضمام إليها <b>معطّل</b>. معرّفات meetingRef الظاهرة في الجدولة قديمة ولا تُستخدم كروابط.</p>')
-      + intCard('الإشعارات (Notifications)', ig.notifications,
-          '<p>البديل المتاح حاليًا: المشاركة داخل البوابة أو المشاركة اليدوية مع الطلاب.</p>')
-      + intCard('التخزين (Storage)', ig.storage,
-          '<p>رفع الملفات معطّل حتى يُتحقق من حاوية التخزين؛ تُدار المواد كسجلات مع روابط مؤكدة فقط.</p>');
+  async function viewDashboard() {
+    var ig = await api('/api/integrations');
+    function card(title, c, extra) {
+      return '<div class="card"><h3>' + title + ' ' + badge(c.status) + '</h3>'
+        + '<p class="muted">المصدر: <code>' + esc(c.key) + '</code> — مُكوَّن: ' + (c.configured ? 'نعم' : 'لا')
+        + ' · اختبار مباشر: ' + (c.liveTest ? 'ناجح' : 'لا/لم يُجرَ') + '</p>' + (extra || '') + '</div>';
+    }
+    document.getElementById('app').innerHTML = '<h2>حالة التكاملات</h2>'
+      + '<p class="rule">القاعدة: لا تظهر ميزة كمتاحة إلا بمفتاح مُكوَّن <b>و</b>اختبار مباشر ناجح لحظة العرض. فُحصت هذه الحالات الآن من الخادم (' + esc(ig.checkedAt) + ').</p>'
+      + card('الاجتماعات (Meetings)', ig.meetings, '<p>إنشاء/انضمام الاجتماعات معطّل. معرّفات meetingRef القديمة تُعرض كنص فقط.</p>')
+      + card('الإشعارات (Notifications)', ig.notifications, '<p>البديل: مشاركة داخل البوابة أو مشاركة يدوية.</p>')
+      + card('قاعدة البيانات (Database)', ig.database, '<p>التخزين الدائم للمستخدمين والجلسات والمواد والفواتير وسجل التدقيق.</p>')
+      + card('تخزين إثباتات الدفع (Storage)', ig.storage, '<p>حاوية <code>portal-receipts</code> لرفع إثباتات الدفع من مسار الفوترة.</p>');
   }
 
-  function viewSchedule() {
-    var rows = state.data.sessions.map(function (s) {
-      return '<tr><td>' + esc(s.id) + '</td><td>' + esc(courseTitle(s.courseId)) + '</td>'
-        + '<td>' + esc(s.startsAt) + '</td>'
-        + '<td>' + (s.meetingRef ? esc(s.meetingRef) + ' <span class="badge warn">معرّف قديم — غير قابل للانضمام</span>' : '—') + '</td>'
-        + '<td>' + shareBadge(s.shareState) + '</td>'
-        + '<td>' + (s.studentVisible ? 'نعم' : 'لا') + '</td></tr>';
+  async function viewSchedule() {
+    var data = await api('/api/lessons');
+    var courses = (await api('/api/courses')).courses;
+    var title = {}; courses.forEach(function (c) { title[c.id] = c.title; });
+    var rows = data.lessons.map(function (s) {
+      return '<tr><td>' + esc(s.id) + '</td><td>' + esc(title[s.course_id] || s.course_id) + '</td>'
+        + '<td>' + esc(s.starts_at) + '</td>'
+        + '<td>' + (s.meeting_ref ? esc(s.meeting_ref) + ' <span class="badge warn">معرّف قديم — غير قابل للانضمام</span>' : '—') + '</td>'
+        + '<td>' + esc(s.share_state) + '</td><td>' + (s.student_visible ? 'نعم' : 'لا') + '</td></tr>';
     }).join('');
-    var opts = state.data.courses.map(function (c) {
-      return '<option value="' + c.id + '">' + esc(c.title) + ' (' + c.id + ')</option>';
-    }).join('');
-    return '<h2>جدولة الدروس</h2>'
-      + '<table><thead><tr><th>الجلسة</th><th>المقرر</th><th>البدء</th><th>الاجتماع</th><th>المشاركة</th><th>ظاهرة للطلاب</th></tr></thead><tbody>'
-      + rows + '</tbody></table>'
+    var opts = courses.map(function (c) { return '<option value="' + c.id + '">' + esc(c.title) + ' (' + c.id + ')</option>'; }).join('');
+    document.getElementById('app').innerHTML = noticeHtml() + '<h2>جدولة الدروس</h2>'
+      + '<table><thead><tr><th>الجلسة</th><th>المقرر</th><th>البدء</th><th>الاجتماع</th><th>المشاركة</th><th>ظاهرة للطلاب</th></tr></thead><tbody>' + rows + '</tbody></table>'
       + '<div class="card"><h3>جدولة جلسة جديدة</h3>'
       + '<label>المقرر <select id="sesCourse">' + opts + '</select></label>'
       + '<label>تاريخ ووقت البدء <input id="sesStart" type="datetime-local"></label>'
-      + '<button onclick="TP.addSession()">جدولة</button> '
-      + '<button disabled title="تكامل الاجتماعات غير متصل: MEETING_PROVIDER_TOKEN غير موجود">إنشاء اجتماع (غير متاح — التكامل غير متصل)</button>'
-      + '<p class="muted">زر إنشاء الاجتماع معطّل عمدًا حتى يُكوَّن مزوّد الاجتماعات وينجح اختبار مباشر.</p></div>';
+      + '<button onclick="TP.addLesson()">جدولة</button> '
+      + '<button disabled title="تكامل الاجتماعات غير متصل">إنشاء اجتماع (غير متاح — التكامل غير متصل)</button>'
+      + '<p class="muted">تُحفظ الجلسة في قاعدة البيانات وتُسجَّل في سجل التدقيق.</p></div>';
   }
 
-  function linkStatus(m) {
-    if (!m.priorLink) return '<span class="muted">لا رابط</span>';
-    if (isStaleLink(m)) return '<span class="badge bad">رابط قديم/غير صالح — يتطلب إعادة رفع</span>';
-    return '<span class="badge ok">متاح</span>';
+  function linkBadge(m) {
+    if (m.link_state === 'stale') return '<span class="badge bad">رابط قديم/غير صالح — يتطلب إعادة رفع</span>';
+    if (m.link_state === 'ok') return '<span class="badge ok">متاح</span>';
+    return '<span class="muted">لا رابط</span>';
   }
 
-  function viewMaterials() {
-    var rows = state.data.materials.map(function (m) {
-      return '<tr><td>' + esc(m.id) + '</td><td>' + esc(courseTitle(m.courseId)) + '</td>'
+  async function viewMaterials() {
+    var data = await api('/api/materials');
+    var courses = (await api('/api/courses')).courses;
+    var title = {}; courses.forEach(function (c) { title[c.id] = c.title; });
+    var rows = data.materials.map(function (m) {
+      return '<tr><td>' + esc(m.id) + '</td><td>' + esc(title[m.course_id] || m.course_id) + '</td>'
         + '<td>' + esc(m.kind) + '</td><td>' + esc(m.title) + '</td><td>' + esc(m.version) + '</td>'
-        + '<td>' + linkStatus(m) + '</td>'
-        + '<td>' + (m.learnerVisible ? 'نعم' : 'لا') + '</td></tr>';
+        + '<td>' + linkBadge(m) + '</td><td>' + (m.learner_visible ? 'نعم' : 'لا') + '</td></tr>';
     }).join('');
-    var opts = state.data.courses.map(function (c) {
-      return '<option value="' + c.id + '">' + esc(c.title) + ' (' + c.id + ')</option>';
-    }).join('');
-    return '<h2>إدارة المواد</h2>'
-      + '<table><thead><tr><th>المادة</th><th>المقرر</th><th>النوع</th><th>العنوان</th><th>الإصدار</th><th>الرابط</th><th>ظاهرة للطلاب</th></tr></thead><tbody>'
-      + rows + '</tbody></table>'
+    var opts = courses.map(function (c) { return '<option value="' + c.id + '">' + esc(c.title) + ' (' + c.id + ')</option>'; }).join('');
+    document.getElementById('app').innerHTML = noticeHtml() + '<h2>إدارة المواد</h2>'
+      + '<table><thead><tr><th>المادة</th><th>المقرر</th><th>النوع</th><th>العنوان</th><th>الإصدار</th><th>الرابط</th><th>ظاهرة للطلاب</th></tr></thead><tbody>' + rows + '</tbody></table>'
       + '<div class="card"><h3>إضافة مادة (سجل)</h3>'
       + '<label>المقرر <select id="matCourse">' + opts + '</select></label>'
       + '<label>النوع <select id="matKind"><option value="pdf">pdf</option><option value="video">video</option><option value="link">link</option><option value="image">image</option><option value="csv">csv</option></select></label>'
       + '<label>العنوان <input id="matTitle" type="text"></label>'
       + '<button onclick="TP.addMaterial()">إضافة</button> '
-      + '<button disabled title="حالة التخزين غير مؤكدة: STORAGE_UPLOAD_BUCKET لم يُتحقق منه">رفع ملف (غير متاح — التخزين غير مؤكد)</button>'
-      + '<p class="muted">رفع الملفات معطّل حتى يُتحقق من التخزين؛ تُضاف المواد كسجلات بلا روابط جديدة.</p></div>';
+      + '<button disabled title="رفع ملفات المواد لم يُفعَّل بعد">رفع ملف مادة (غير متاح)</button></div>';
   }
 
-  function viewShare() {
-    var srows = state.data.sessions.map(function (s) {
-      var action = s.shareState === 'shared'
-        ? '<span class="badge ok">تمت المشاركة</span>'
-        : '<button onclick="TP.shareSession(\'' + s.id + '\')">مشاركة مع الطلاب</button>';
-      return '<tr><td>' + esc(s.id) + '</td><td>' + esc(courseTitle(s.courseId)) + '</td>'
-        + '<td>' + shareBadge(s.shareState) + '</td><td>' + action + '</td></tr>';
+  async function viewShare() {
+    var lessons = (await api('/api/lessons')).lessons;
+    var materials = (await api('/api/materials')).materials;
+    var courses = (await api('/api/courses')).courses;
+    var title = {}; courses.forEach(function (c) { title[c.id] = c.title; });
+    var srows = lessons.map(function (s) {
+      var action = s.share_state === 'shared' ? '<span class="badge ok">تمت المشاركة</span>'
+        : '<button class="small" onclick="TP.share(\'lesson\',\'' + s.id + '\')">مشاركة مع الطلاب</button>';
+      return '<tr><td>' + esc(s.id) + '</td><td>' + esc(title[s.course_id] || s.course_id) + '</td><td>' + esc(s.share_state) + '</td><td>' + action + '</td></tr>';
     }).join('');
-    var mrows = state.data.materials.map(function (m) {
-      var blocked = m.priorLink && isStaleLink(m);
-      var action = m.learnerVisible
-        ? '<span class="badge ok">ظاهرة للطلاب</span>'
-        : '<button onclick="TP.shareMaterial(\'' + m.id + '\')">مشاركة مع الطلاب</button>';
-      return '<tr><td>' + esc(m.id) + '</td><td>' + esc(courseTitle(m.courseId)) + '</td>'
-        + '<td>' + esc(m.title) + '</td>'
-        + '<td>' + (blocked ? '<span class="badge bad">الرابط قديم — لن يُقدَّم للطلاب</span>' : linkStatus(m)) + '</td>'
-        + '<td>' + action + '</td></tr>';
+    var mrows = materials.map(function (m) {
+      var action = m.learner_visible ? '<span class="badge ok">ظاهرة للطلاب</span>'
+        : '<button class="small" onclick="TP.share(\'material\',\'' + m.id + '\')">مشاركة مع الطلاب</button>';
+      return '<tr><td>' + esc(m.id) + '</td><td>' + esc(title[m.course_id] || m.course_id) + '</td><td>' + esc(m.title) + '</td><td>' + linkBadge(m) + '</td><td>' + action + '</td></tr>';
     }).join('');
-    return '<h2>المشاركة مع الطلاب</h2>'
-      + '<p class="notice">الإشعارات غير متصلة (NOTIFICATION_PROVIDER_KEY غير موجود). المشاركة هنا تجعل المحتوى ظاهرًا داخل البوابة فقط؛ '
-      + 'شارك التفاصيل يدويًا مع الطلاب عند الحاجة.</p>'
-      + '<h3>الجلسات</h3>'
-      + '<table><thead><tr><th>الجلسة</th><th>المقرر</th><th>الحالة</th><th>إجراء</th></tr></thead><tbody>' + srows + '</tbody></table>'
-      + '<h3>المواد</h3>'
-      + '<table><thead><tr><th>المادة</th><th>المقرر</th><th>العنوان</th><th>الرابط</th><th>إجراء</th></tr></thead><tbody>' + mrows + '</tbody></table>';
+    document.getElementById('app').innerHTML = noticeHtml() + '<h2>المشاركة مع الطلاب</h2>'
+      + '<p class="notice">الإشعارات غير متصلة: المشاركة تجعل المحتوى ظاهرًا داخل البوابة فقط. كل مشاركة تتطلب تأكيدًا وتُسجَّل في سجل التدقيق.</p>'
+      + '<h3>الجلسات</h3><table><thead><tr><th>الجلسة</th><th>المقرر</th><th>الحالة</th><th>إجراء</th></tr></thead><tbody>' + srows + '</tbody></table>'
+      + '<h3>المواد</h3><table><thead><tr><th>المادة</th><th>المقرر</th><th>العنوان</th><th>الرابط</th><th>إجراء</th></tr></thead><tbody>' + mrows + '</tbody></table>';
   }
 
-  function viewBilling() {
-    var rows = state.data.invoices.map(function (inv) {
-      var total = totalOf(inv);
-      var mismatch = inv.priorTotal !== total;
-      return '<tr><td>' + esc(inv.id) + '</td><td>' + esc(inv.studentId) + '</td>'
-        + '<td>' + money(inv.amountExTax) + '</td>'
-        + '<td>' + money(taxOf(inv)) + ' (' + Math.round(inv.taxRate * 100) + '%)</td>'
-        + '<td><b>' + money(total) + '</b>'
-        + (mismatch ? ' <span class="badge bad" title="السجل السابق priorTotal=' + inv.priorTotal + '">سابقة غير متسقة</span>' : '') + '</td>'
-        + '<td>' + esc(inv.status) + '</td>'
-        + '<td>' + (inv.receiptRef ? esc(inv.receiptRef) : '—') + '</td>'
-        + '<td><button onclick="TP.attachReceipt(\'' + inv.id + '\')">إرفاق إثبات دفع</button> '
-        + '<button onclick="TP.downloadPdf(\'' + inv.id + '\')">PDF بالهوية</button></td></tr>';
+  async function viewBilling() {
+    var data = await api('/api/invoices');
+    var rows = data.invoices.map(function (inv) {
+      var inconsistent = inv.prior_total_consistent === false;
+      return '<tr><td>' + esc(inv.id) + '</td><td>' + esc(inv.payer_ref) + '</td>'
+        + '<td>' + money(inv.amount_ex_tax) + '</td>'
+        + '<td>' + money(inv.tax) + ' (' + Math.round(Number(inv.tax_rate) * 100) + '%)</td>'
+        + '<td><b>' + money(inv.total) + '</b>' + (inconsistent ? ' <span class="badge bad" title="prior_total=' + inv.prior_total + '">سابقة غير متسقة</span>' : '') + '</td>'
+        + '<td>' + esc(inv.status) + (inv.void_reason ? ' — ' + esc(inv.void_reason) : '') + '</td>'
+        + '<td>' + (inv.receipt_ref ? '<span class="badge ok">' + esc(inv.receipt_ref) + '</span>' : '—') + '</td>'
+        + '<td>'
+        + '<input type="file" id="rcpt-' + esc(inv.id) + '" style="max-width:150px"> '
+        + '<button class="small" onclick="TP.uploadReceipt(\'' + inv.id + '\')">رفع إثبات دفع</button> '
+        + (inv.status !== 'void' ? '<button class="small" onclick="TP.invoiceAction(\'' + inv.id + '\',\'issue\')">إصدار</button> '
+          + '<button class="small" onclick="TP.invoiceAction(\'' + inv.id + '\',\'mark-paid\')">تعليم كمدفوعة</button> '
+          + '<button class="small danger" onclick="TP.voidInvoice(\'' + inv.id + '\')">إلغاء</button> ' : '')
+        + '<button class="small" onclick="TP.downloadPdf(\'' + inv.id + '\')">PDF بالهوية</button>'
+        + '</td></tr>';
     }).join('');
-    return '<h2>الفوترة</h2>'
-      + '<p class="rule">التسعير شامل الضريبة ومتسق في كل مكان: الإجمالي = المبلغ قبل الضريبة × (1 + نسبة الضريبة). '
-      + 'السجلات السابقة غير المتسقة (INV-501 وINV-504) موسومة ولا تُعتمد أرقامها القديمة.</p>'
-      + '<table><thead><tr><th>الفاتورة</th><th>مرجع الدافع</th><th>قبل الضريبة</th><th>الضريبة</th><th>الإجمالي (شامل)</th><th>الحالة</th><th>إثبات الدفع</th><th>إجراءات</th></tr></thead><tbody>'
-      + rows + '</tbody></table>'
+    document.getElementById('app').innerHTML = noticeHtml() + '<h2>الفوترة</h2>'
+      + '<p class="rule">الإجماليات شاملة الضريبة وتُحسب على الخادم: الإجمالي = المبلغ × (1 + الضريبة). تعليم «مدفوعة» يتطلب إثبات دفع مرفوعًا. الإلغاء يتطلب سببًا ويُسجَّل.</p>'
+      + '<table><thead><tr><th>الفاتورة</th><th>مرجع الدافع</th><th>قبل الضريبة</th><th>الضريبة</th><th>الإجمالي (شامل)</th><th>الحالة</th><th>إثبات الدفع</th><th>إجراءات</th></tr></thead><tbody>' + rows + '</tbody></table>'
       + '<div class="card"><h3>فاتورة يدوية جديدة</h3>'
-      + '<p class="notice">تنبيه: إدخال الفاتورة <b>لا ينشئ</b> حساب طالب ولا عنوان بريد مفترضًا. '
-      + 'لا يوجد حقل بريد إلكتروني أصلًا؛ يُسجَّل «مرجع الدافع» كنص كما أُدخل فقط.</p>'
-      + '<label>مرجع الدافع <input id="invStudent" type="text" placeholder="مثال: USR-404 أو مرجع خارجي"></label>'
+      + '<p class="notice">إدخال الفاتورة <b>لا ينشئ</b> حساب طالب ولا بريدًا مفترضًا — يُخزَّن «مرجع الدافع» نصًا كما هو، ولا يوجد حقل بريد إلكتروني.</p>'
+      + '<label>مرجع الدافع <input id="invPayer" type="text" placeholder="مثال: USR-404 أو مرجع خارجي"></label>'
       + '<label>المبلغ قبل الضريبة <input id="invAmount" type="number" min="1"></label>'
       + '<label>نسبة الضريبة <input id="invTax" type="number" step="0.01" value="0.1"></label>'
       + '<button onclick="TP.createInvoice()">إنشاء الفاتورة</button></div>';
+    window._invoices = data.invoices;
   }
 
-  function viewStudent() {
-    var vs = state.data.sessions.filter(function (s) { return s.studentVisible && s.shareState === 'shared'; });
-    var vm = state.data.materials.filter(function (m) { return m.learnerVisible; });
+  async function viewUsers() {
+    var data = await api('/api/admin/users');
+    var rows = data.users.map(function (u) {
+      return '<tr><td>' + esc(u.id) + '</td><td>' + esc(u.name) + '</td>'
+        + '<td><select id="role-' + esc(u.id) + '">' + ['admin', 'staff', 'teacher', 'student'].map(function (r) {
+          return '<option value="' + r + '"' + (u.role === r ? ' selected' : '') + '>' + r + '</option>'; }).join('') + '</select></td>'
+        + '<td>' + (u.active ? '<span class="badge ok">نشط</span>' : '<span class="badge bad">موقوف</span>') + '</td>'
+        + '<td>'
+        + '<button class="small" onclick="TP.changeRole(\'' + u.id + '\')">حفظ الدور</button> '
+        + '<button class="small" onclick="TP.resetPassword(\'' + u.id + '\')">إعادة كلمة المرور</button> '
+        + '<button class="small danger" onclick="TP.toggleUser(\'' + u.id + '\',' + u.active + ')">' + (u.active ? 'إيقاف' : 'تفعيل') + '</button>'
+        + '</td></tr>';
+    }).join('');
+    document.getElementById('app').innerHTML = noticeHtml() + '<h2>إدارة المستخدمين</h2>'
+      + '<p class="rule">إجراءات حساسة (إنشاء، تغيير دور، إيقاف، إعادة كلمة مرور) تتطلب تأكيدًا وتُسجَّل في سجل التدقيق. إعادة كلمة المرور تُنهي جلسات المستخدم فورًا.</p>'
+      + '<table><thead><tr><th>المعرّف</th><th>الاسم</th><th>الدور</th><th>الحالة</th><th>إجراءات</th></tr></thead><tbody>' + rows + '</tbody></table>'
+      + '<div class="card"><h3>إنشاء مستخدم جديد (إجراء صريح)</h3>'
+      + '<label>المعرّف <input id="usrId" type="text" placeholder="USR-405"></label>'
+      + '<label>الاسم <input id="usrName" type="text"></label>'
+      + '<label>الدور <select id="usrRole"><option value="staff">staff</option><option value="teacher">teacher</option><option value="student">student</option><option value="admin">admin</option></select></label>'
+      + '<label>كلمة مرور أولية <input id="usrPass" type="password"></label>'
+      + '<button onclick="TP.createUser()">إنشاء</button></div>';
+  }
+
+  async function viewAudit() {
+    var data = await api('/api/admin/audit');
+    var rows = data.audit.map(function (a) {
+      return '<tr><td>' + esc(a.id) + '</td><td>' + esc(a.created_at) + '</td><td>' + esc(a.actor) + '</td>'
+        + '<td>' + esc(a.action) + '</td><td>' + esc(a.target || '—') + '</td>'
+        + '<td><code>' + esc(JSON.stringify(a.detail || {})) + '</code></td></tr>';
+    }).join('');
+    document.getElementById('app').innerHTML = '<h2>سجل التدقيق</h2>'
+      + '<table><thead><tr><th>#</th><th>الوقت</th><th>الفاعل</th><th>الإجراء</th><th>الهدف</th><th>التفاصيل</th></tr></thead><tbody>' + rows + '</tbody></table>';
+  }
+
+  async function viewStudent() {
+    var lessons = (await api('/api/lessons')).lessons;
+    var materials = (await api('/api/materials')).materials;
+    var courses = (await api('/api/courses')).courses;
+    var title = {}; courses.forEach(function (c) { title[c.id] = c.title; });
+    // For privileged roles this view intentionally shows the student perspective.
+    var vs = lessons.filter(function (s) { return s.student_visible && s.share_state === 'shared'; });
+    var vm = materials.filter(function (m) { return m.learner_visible; });
     var srows = vs.map(function (s) {
-      return '<tr><td>' + esc(s.id) + '</td><td>' + esc(courseTitle(s.courseId)) + '</td><td>' + esc(s.startsAt) + '</td></tr>';
+      return '<tr><td>' + esc(s.id) + '</td><td>' + esc(title[s.course_id] || s.course_id) + '</td><td>' + esc(s.starts_at) + '</td></tr>';
     }).join('') || '<tr><td colspan="3" class="muted">لا جلسات منشورة حاليًا.</td></tr>';
     var mrows = vm.map(function (m) {
-      var link = !m.priorLink ? '<span class="muted">لا رابط</span>'
-        : (isStaleLink(m) ? '<span class="badge bad">غير متاح حاليًا (رابط قديم)</span>'
-        : '<span class="badge ok">متاح</span>');
-      return '<tr><td>' + esc(m.id) + '</td><td>' + esc(courseTitle(m.courseId)) + '</td>'
-        + '<td>' + esc(m.title) + '</td><td>' + esc(m.version) + '</td><td>' + link + '</td></tr>';
+      return '<tr><td>' + esc(m.id) + '</td><td>' + esc(title[m.course_id] || m.course_id) + '</td>'
+        + '<td>' + esc(m.title) + '</td><td>' + esc(m.version) + '</td><td>' + linkBadge(m) + '</td></tr>';
     }).join('') || '<tr><td colspan="5" class="muted">لا مواد منشورة حاليًا.</td></tr>';
-    return '<h2>عرض الطالب</h2>'
-      + '<p class="muted">يعرض فقط ما شاركه المدرّس ونشره للطلاب.</p>'
-      + '<h3>الجلسات المنشورة</h3>'
-      + '<table><thead><tr><th>الجلسة</th><th>المقرر</th><th>البدء</th></tr></thead><tbody>' + srows + '</tbody></table>'
-      + '<h3>المواد المنشورة</h3>'
-      + '<table><thead><tr><th>المادة</th><th>المقرر</th><th>العنوان</th><th>الإصدار</th><th>الرابط</th></tr></thead><tbody>' + mrows + '</tbody></table>';
+    document.getElementById('app').innerHTML = '<h2>عرض الطالب</h2>'
+      + '<p class="muted">يعرض فقط ما نُشر للطلاب (تصفية مفروضة على الخادم لدور الطالب).</p>'
+      + '<h3>الجلسات المنشورة</h3><table><thead><tr><th>الجلسة</th><th>المقرر</th><th>البدء</th></tr></thead><tbody>' + srows + '</tbody></table>'
+      + '<h3>المواد المنشورة</h3><table><thead><tr><th>المادة</th><th>المقرر</th><th>العنوان</th><th>الإصدار</th><th>الرابط</th></tr></thead><tbody>' + mrows + '</tbody></table>';
   }
 
-  var VIEWS = {
-    dashboard: viewDashboard,
-    schedule: viewSchedule,
-    materials: viewMaterials,
-    share: viewShare,
-    billing: viewBilling,
-    student: viewStudent
+  var LOADERS = {
+    dashboard: viewDashboard, schedule: viewSchedule, materials: viewMaterials,
+    share: viewShare, billing: viewBilling, users: viewUsers, audit: viewAudit, student: viewStudent
   };
 
-  /* ---------- render ---------- */
-
-  function renderNav() {
-    document.getElementById('mainNav').innerHTML = VIEW_ORDER.filter(can).map(function (v) {
-      return '<button class="nav-btn' + (state.view === v ? ' active' : '')
-        + '" onclick="TP.go(\'' + v + '\')">' + LABELS[v] + '</button>';
-    }).join('');
+  async function load() {
+    renderChrome();
+    if (!state.user) { renderLogin(); return; }
+    showLoading();
+    try { await LOADERS[state.view](); }
+    catch (e) {
+      if (e.message !== 'unauthenticated') {
+        document.getElementById('app').innerHTML = '<p class="error">خطأ: ' + esc(e.message) + '</p>';
+      }
+    }
   }
 
-  function render() {
-    renderNav();
-    document.getElementById('app').innerHTML =
-      (state.notice ? '<p class="notice">' + esc(state.notice) + '</p>' : '') + VIEWS[state.view]();
-  }
-
-  /* ---------- actions ---------- */
-
-  function nextId(items, prefix) {
-    var next = 1;
-    items.forEach(function (i) {
-      var n = parseInt(String(i.id).split('-')[1], 10);
-      if (!isNaN(n) && n >= next) next = n + 1;
-    });
-    return prefix + '-' + next;
-  }
+  /* ---------- actions (sensitive ones always confirm first) ---------- */
 
   window.TP = {
-    go: function (v) { if (!can(v)) return; state.view = v; state.notice = ''; render(); },
-    setRole: function (r) {
-      state.role = r;
-      if (!can(state.view)) state.view = PERMS[r][0];
-      state.notice = '';
-      render();
+    login: async function () {
+      var userId = document.getElementById('loginId').value.trim();
+      var password = document.getElementById('loginPass').value;
+      try {
+        var data = await api('/api/auth', { method: 'POST', body: { userId: userId, password: password } });
+        setSession(data.token, data.user);
+        state.view = NAV[data.user.role][0];
+        state.notice = '';
+        load();
+      } catch (e) { if (e.message !== 'unauthenticated') renderLogin('تعذّر الدخول: ' + e.message); }
     },
-    addSession: function () {
-      var course = document.getElementById('sesCourse').value;
-      var start = document.getElementById('sesStart').value;
-      if (!start) { window.alert('حدّد تاريخ ووقت البدء.'); return; }
-      var id = nextId(state.data.sessions, 'SES');
-      state.data.sessions.push({
-        id: id, courseId: course, startsAt: start,
-        meetingRef: null, shareState: 'not-shared', studentVisible: false
-      });
-      state.notice = 'جُدولت الجلسة ' + id + '. لم يُنشأ اجتماع: تكامل الاجتماعات غير متصل.';
-      render();
+    logout: async function () {
+      try { await api('/api/auth', { method: 'DELETE' }); } catch (e) {}
+      clearSession(); renderLogin();
     },
-    addMaterial: function () {
-      var course = document.getElementById('matCourse').value;
+    go: function (v) { if (!allowed(v)) return; state.view = v; state.notice = ''; load(); },
+    addLesson: async function () {
+      var courseId = document.getElementById('sesCourse').value;
+      var startsAt = document.getElementById('sesStart').value;
+      if (!startsAt) { window.alert('حدّد تاريخ البدء.'); return; }
+      if (!window.confirm('تأكيد: جدولة جلسة جديدة للمقرر ' + courseId + '؟')) return;
+      var data = await api('/api/lessons', { method: 'POST', body: { courseId: courseId, startsAt: startsAt } });
+      state.notice = 'جُدولت الجلسة ' + data.lesson.id + ' وحُفظت في قاعدة البيانات. لم يُنشأ اجتماع: التكامل غير متصل.';
+      load();
+    },
+    addMaterial: async function () {
+      var courseId = document.getElementById('matCourse').value;
       var kind = document.getElementById('matKind').value;
       var title = document.getElementById('matTitle').value.trim();
       if (!title) { window.alert('عنوان المادة مطلوب.'); return; }
-      var id = nextId(state.data.materials, 'MAT');
-      state.data.materials.push({
-        id: id, courseId: course, kind: kind, title: title,
-        version: new Date().toISOString().slice(0, 10), learnerVisible: false, priorLink: null
-      });
-      state.notice = 'أُضيفت المادة ' + id + ' كسجل (رفع الملفات معطّل: التخزين غير مؤكد).';
-      render();
+      if (!window.confirm('تأكيد: إضافة مادة «' + title + '»؟')) return;
+      var data = await api('/api/materials', { method: 'POST', body: { courseId: courseId, kind: kind, title: title } });
+      state.notice = 'أُضيفت المادة ' + data.material.id + ' كسجل دائم.';
+      load();
     },
-    shareSession: function (id) {
-      var s = state.data.sessions.filter(function (x) { return x.id === id; })[0];
-      if (!s) return;
-      s.shareState = 'shared';
-      s.studentVisible = true;
-      state.notice = 'أصبحت الجلسة ' + id + ' ظاهرة للطلاب داخل البوابة. الإشعارات غير متصلة — شارك التفاصيل يدويًا.';
-      render();
+    share: async function (type, id) {
+      if (!window.confirm('تأكيد حساس: مشاركة ' + id + ' مع الطلاب؟ ستصبح ظاهرة لهم فورًا.')) return;
+      var data = await api('/api/share', { method: 'POST', body: { type: type, id: id } });
+      state.notice = 'تمت مشاركة ' + id + ' داخل البوابة. الإشعارات: ' + data.notifications + ' — شارك التفاصيل يدويًا عند الحاجة.';
+      load();
     },
-    shareMaterial: function (id) {
-      var m = state.data.materials.filter(function (x) { return x.id === id; })[0];
-      if (!m) return;
-      m.learnerVisible = true;
-      var extra = (m.priorLink && isStaleLink(m)) ? ' تنبيه: رابطها قديم ولن يُقدَّم للطلاب حتى يُعاد رفعها.' : '';
-      state.notice = 'أصبحت المادة ' + id + ' ظاهرة للطلاب داخل البوابة.' + extra;
-      render();
-    },
-    createInvoice: function () {
-      var ref = document.getElementById('invStudent').value.trim();
+    createInvoice: async function () {
+      var payerRef = document.getElementById('invPayer').value.trim();
       var amount = Number(document.getElementById('invAmount').value);
-      var tax = Number(document.getElementById('invTax').value);
-      if (!ref) { window.alert('مرجع الدافع مطلوب.'); return; }
-      if (!amount || amount <= 0) { window.alert('المبلغ غير صالح.'); return; }
-      if (!(tax >= 0 && tax < 1)) { window.alert('نسبة الضريبة غير صالحة.'); return; }
-      var id = nextId(state.data.invoices, 'INV');
-      var inv = {
-        id: id,
-        studentId: ref, // stored verbatim: no student account and no email is created
-        amountExTax: amount,
-        taxRate: tax,
-        priorTotal: Math.round(amount * (1 + tax)), // consistent tax-inclusive from birth
-        status: 'manual-entry',
-        receiptRef: null,
-        createdBy: state.role + ' portal entry'
-      };
-      state.data.invoices.push(inv);
-      state.notice = 'أُنشئت الفاتورة ' + id + ' بإجمالي شامل الضريبة ' + money(totalOf(inv))
-        + '. لم يُنشأ أي حساب طالب أو عنوان بريد.';
-      render();
+      var taxRate = Number(document.getElementById('invTax').value);
+      if (!payerRef || !amount || amount <= 0 || !(taxRate >= 0 && taxRate < 1)) { window.alert('تحقق من الحقول.'); return; }
+      var total = Math.round(amount * (1 + taxRate));
+      if (!window.confirm('تأكيد: إنشاء فاتورة يدوية للدافع «' + payerRef + '» بإجمالي شامل الضريبة ' + money(total) + '؟ لن يُنشأ أي حساب طالب أو بريد.')) return;
+      var data = await api('/api/invoices', { method: 'POST', body: { payerRef: payerRef, amountExTax: amount, taxRate: taxRate } });
+      state.notice = 'أُنشئت الفاتورة ' + data.invoice.id + ' بإجمالي ' + money(data.invoice.total) + '. ' + data.note;
+      load();
     },
-    attachReceipt: function (id) {
-      var inv = state.data.invoices.filter(function (x) { return x.id === id; })[0];
-      if (!inv) return;
-      var ref = window.prompt('مرجع إثبات الدفع (مثال: RCPT-07):', inv.receiptRef || '');
-      if (ref && ref.trim()) {
-        inv.receiptRef = ref.trim();
-        if (inv.status !== 'paid') inv.status = 'paid';
-        state.notice = 'أُرفق إثبات الدفع ' + inv.receiptRef + ' بالفاتورة ' + id + '.';
-        render();
-      }
+    invoiceAction: async function (id, action) {
+      var label = action === 'issue' ? 'إصدار' : 'تعليم كمدفوعة';
+      if (action === 'mark-paid' && !window.confirm('تأكيد: تعليم ' + id + ' كمدفوعة؟ (يرفض الخادم إن لم يوجد إثبات دفع)')) return;
+      if (action === 'issue' && !window.confirm('تأكيد: ' + label + ' الفاتورة ' + id + '؟')) return;
+      try {
+        await api('/api/invoices', { method: 'PATCH', body: { id: id, action: action } });
+        state.notice = 'تم: ' + label + ' ' + id + '.';
+      } catch (e) { state.notice = 'رُفض الإجراء: ' + e.message; }
+      load();
+    },
+    voidInvoice: async function (id) {
+      var reason = window.prompt('إلغاء الفاتورة ' + id + ' — السبب (إلزامي):');
+      if (!reason || !reason.trim()) return;
+      if (!window.confirm('تأكيد حساس: إلغاء الفاتورة ' + id + ' نهائيًا؟ السبب: ' + reason)) return;
+      await api('/api/invoices', { method: 'PATCH', body: { id: id, action: 'void', reason: reason.trim() } });
+      state.notice = 'أُلغيت الفاتورة ' + id + ' وسُجّل السبب.';
+      load();
+    },
+    uploadReceipt: async function (id) {
+      var input = document.getElementById('rcpt-' + id);
+      var file = input && input.files && input.files[0];
+      if (!file) { window.alert('اختر ملف إثبات الدفع أولًا.'); return; }
+      if (file.size > 2 * 1024 * 1024) { window.alert('الحد الأقصى 2MB.'); return; }
+      if (!window.confirm('تأكيد: رفع «' + file.name + '» كإثبات دفع للفاتورة ' + id + '؟ ستُعلَّم الفاتورة كمدفوعة.')) return;
+      var base64 = await new Promise(function (resolve, reject) {
+        var r = new FileReader();
+        r.onload = function () { resolve(String(r.result).split(',')[1] || ''); };
+        r.onerror = reject;
+        r.readAsDataURL(file);
+      });
+      var data = await api('/api/receipts?invoice=' + encodeURIComponent(id), {
+        method: 'POST', body: { fileName: file.name, contentBase64: base64, contentType: file.type || 'application/octet-stream' }
+      });
+      state.notice = 'رُفع إثبات الدفع إلى ' + data.receipt.file_path + ' وأصبحت ' + id + ' مدفوعة.';
+      load();
     },
     downloadPdf: function (id) {
-      var inv = state.data.invoices.filter(function (x) { return x.id === id; })[0];
+      var inv = (window._invoices || []).filter(function (i) { return i.id === id; })[0];
       if (!inv) return;
-      var blob = window.buildInvoicePdf(inv, state.data.brand);
+      var blob = window.buildInvoicePdf({
+        id: inv.id, studentId: inv.payer_ref, amountExTax: inv.amount_ex_tax,
+        taxRate: Number(inv.tax_rate), status: inv.status, receiptRef: inv.receipt_ref, createdBy: inv.created_by
+      }, { name: 'Teaching Portal', tagline: 'Education operations portal' });
       var a = document.createElement('a');
       a.href = URL.createObjectURL(blob);
       a.download = id + '.pdf';
-      document.body.appendChild(a);
-      a.click();
-      document.body.removeChild(a);
+      document.body.appendChild(a); a.click(); document.body.removeChild(a);
+    },
+    createUser: async function () {
+      var id = document.getElementById('usrId').value.trim();
+      var name = document.getElementById('usrName').value.trim();
+      var role = document.getElementById('usrRole').value;
+      var password = document.getElementById('usrPass').value;
+      if (!id || !name || password.length < 8) { window.alert('معرّف واسم وكلمة مرور (8+ أحرف) مطلوبة.'); return; }
+      if (!window.confirm('تأكيد حساس: إنشاء مستخدم ' + id + ' بدور ' + role + '؟')) return;
+      await api('/api/admin/users', { method: 'POST', body: { id: id, name: name, role: role, password: password } });
+      state.notice = 'أُنشئ المستخدم ' + id + ' بدور ' + role + '.';
+      load();
+    },
+    changeRole: async function (id) {
+      var role = document.getElementById('role-' + id).value;
+      if (!window.confirm('تأكيد حساس: تغيير دور ' + id + ' إلى ' + role + '؟')) return;
+      await api('/api/admin/users', { method: 'PATCH', body: { id: id, role: role } });
+      state.notice = 'غُيّر دور ' + id + ' إلى ' + role + '.';
+      load();
+    },
+    toggleUser: async function (id, active) {
+      var next = !active;
+      if (!window.confirm('تأكيد حساس: ' + (next ? 'تفعيل' : 'إيقاف') + ' المستخدم ' + id + '؟')) return;
+      try {
+        await api('/api/admin/users', { method: 'PATCH', body: { id: id, active: next } });
+        state.notice = (next ? 'فُعّل ' : 'أُوقف ') + id + '.';
+      } catch (e) { state.notice = 'رُفض: ' + e.message; }
+      load();
+    },
+    resetPassword: async function (id) {
+      var pass = window.prompt('كلمة مرور جديدة للمستخدم ' + id + ' (8+ أحرف). ستُنهى جلساته فورًا:');
+      if (!pass) return;
+      if (pass.length < 8) { window.alert('قصيرة جدًا.'); return; }
+      if (!window.confirm('تأكيد حساس: إعادة كلمة مرور ' + id + ' وإنهاء جلساته؟')) return;
+      await api('/api/admin/users', { method: 'PATCH', body: { id: id, password: pass } });
+      state.notice = 'أُعيدت كلمة مرور ' + id + ' وأُنهيت جلساته.';
+      load();
     }
   };
 
-  document.getElementById('roleSelect').addEventListener('change', function (e) {
-    window.TP.setRole(e.target.value);
-  });
-  render();
+  (async function init() {
+    if (state.token) {
+      try {
+        var me = await api('/api/auth');
+        state.user = me.user;
+      } catch (e) { /* cleared inside api() on 401 */ }
+    }
+    load();
+  })();
 })();

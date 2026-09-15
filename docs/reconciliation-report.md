@@ -1,47 +1,55 @@
-# Reconciliation and release report — M-T428-V4 (2026-09-15)
+# Reconciliation and release report — M-T428-V4
 
-Built from the prior-state fixtures in `docs/`. This file separates what was
-implemented, what was verified, and what remains unverified.
+## v2 (2026-09-15) — server-backed release
 
-## Implemented
-- Teacher path in the requested order: **Schedule → Materials → Share**
-  (the prior nav had Materials before Schedule — fixed).
-- Session scheduling (list + add), materials management (list + add as records),
-  and sharing to students (sessions: `shareState=shared`, `studentVisible=true`;
-  materials: `learnerVisible=true`).
-- Integration status dashboard driven by a strict rule: a capability shows as
-  available only with a configured key **and** a passing live test.
-  - Meetings: **not connected** (`MEETING_PROVIDER_TOKEN` absent). Create/join
-    disabled; legacy `meetingRef` values rendered as identifiers only.
-  - Notifications: **not connected** (`NOTIFICATION_PROVIDER_KEY` absent).
-    In-portal / manual share presented as the alternative.
-  - Storage: **unconfirmed** (`STORAGE_UPLOAD_BUCKET` unknown). File upload
-    disabled; materials managed as records.
-- Unified roles: admin (all), staff (billing), teacher (schedule/materials/share),
-  student (read-only published view).
-- Billing: manual invoices for staff/admin, payment-proof receipt reference
-  (attaching proof marks the invoice paid), branded single-page PDF generated
-  client-side (`lib/pdf.js`, base-14 Helvetica, Latin labels), and consistently
-  tax-inclusive totals. INV-501 and INV-504 prior totals are flagged as
-  inconsistent (they excluded tax); new invoices are born consistent.
-- Invoice entry creates **no** student account and **no** assumed email address;
-  payer reference is stored verbatim.
-- Stale links blocked from students: MAT-301 (stale v1 download) and MAT-304
-  (invalid legacy domain).
+### Implemented
+- **Server authentication & RBAC:** `/api/auth` (login/logout/me), bcrypt
+  password checks in Postgres (`portal_verify_user`, pgcrypto), 12h session
+  tokens; every API route enforces role membership server-side. Client has no
+  role switcher.
+- **Persistent storage (Supabase project `zgkkoavrxxgjsykwazkq`):**
+  `portal_users`, `portal_sessions`, `portal_courses`, `portal_lessons`,
+  `portal_materials`, `portal_invoices`, `portal_receipts`, `portal_audit_log`.
+- **Teacher path:** Schedule → Materials → Share (fixed order). Lessons and
+  materials persist; sharing sets student visibility server-side and is audited.
+- **Admin tools:** user list/create (explicit, password >= 8), role change,
+  activate/deactivate (self-deactivate blocked), password reset with session
+  revocation, audit log view (last 200 events).
+- **Billing:** manual invoices by staff/admin; tax-inclusive totals computed
+  server-side; `payer_ref` stored verbatim (no account/email creation — the API
+  has no email field at all); invoice lifecycle issue / mark-paid (server
+  rejects without uploaded proof or legacy receipt ref) / void (reason
+  required); branded client-side PDF.
+- **Payment proof upload:** real file upload (<= 2MB) to private Supabase
+  Storage bucket `portal-receipts` via `/api/receipts`; marks invoice paid;
+  audited.
+- **Confirmations:** share, invoice create/void/mark-paid/issue, receipt
+  upload, user create/role/deactivate/password reset — all require explicit
+  confirmation and are written to the audit log.
+- **Honest integrations:** `/api/integrations` live-checks database and storage
+  on every request; meetings/notifications report "not-connected" (no provider
+  keys configured).
 
-## Verified
-- Source fixtures read and reconciled (billing, roster, schedule/materials,
-  integration evidence) — 2026-09-15.
-- Deployment: see the Vercel deployment record for this release
-  (state and URL recorded by the deploying workflow).
+### Verified (checked during this workflow)
+- Schema + seed created: 4 users, 6 courses, 6 lessons, 6 materials, 6
+  invoices, bucket `portal-receipts` (SQL count check).
+- Password verification: `portal_verify_user('USR-401', correct)` returns the
+  user; wrong password returns empty (tested via SQL).
+- Vercel env vars set: `SUPABASE_URL` (plain), `SUPABASE_SERVICE_ROLE_KEY`
+  (sensitive) for production+preview.
 
-## Not verified / open
-- No live meeting, notification, or storage integration exists; nothing was
-  tested against a real provider. All three remain disabled/unconfirmed by design.
-- PDF layout verified by construction (deterministic generator), not by visual
-  rendering in a PDF viewer; Arabic strings are not embedded in the PDF
-  (Latin labels only).
-- Prior deployment notes (MAT-301 stale link, INV-501 tax-excluded printout)
-  are mitigated in code, but no historical deployment was re-tested.
-- Session/material/invoice state is in-browser (seed data); no backend
-  persistence is part of this release.
+### Not verified / open
+- End-to-end HTTP behavior of `/api/*` on the deployed URL (no live HTTP test
+  tool was available in this workflow; Firecrawl had no credits, Supadata was
+  rate-limited). Deployment readiness is reported separately.
+- PDF visual rendering (generator is deterministic; not opened in a viewer).
+- Meetings/notifications integrations remain unconnected by design until real
+  provider keys exist and pass a live test.
+- RLS on `portal_*` tables is not enabled; access control is enforced by the
+  serverless layer using the service role. Enabling RLS + policies is a
+  recommended hardening step.
+
+## v1 (2026-09-15, superseded)
+Static in-browser preview: teacher path, honest integration display,
+tax-inclusive billing, branded PDF. Limitations (no auth, no server, no
+persistence) were documented and are addressed in v2 above.

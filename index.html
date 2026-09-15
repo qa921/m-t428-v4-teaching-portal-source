@@ -3,26 +3,17 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>بوابة التعليم — Teaching Portal</title>
+<title>بوابة التعليم — Teaching Portal v2</title>
 <link rel="stylesheet" href="styles.css">
 </head>
 <body>
 <header class="topbar">
-  <div class="brand"><span class="brand-mark">◆</span> بوابة التعليم <span class="brand-en">Teaching Portal</span></div>
-  <div class="role-switch">
-    <label for="roleSelect">الدور:</label>
-    <select id="roleSelect">
-      <option value="admin">إدارة (USR-401)</option>
-      <option value="staff">موظف (USR-402)</option>
-      <option value="teacher" selected>مدرّس (USR-403)</option>
-      <option value="student">طالب (USR-404)</option>
-    </select>
-  </div>
+  <div class="brand"><span class="brand-mark">◆</span> بوابة التعليم <span class="brand-en">Teaching Portal — v2</span></div>
+  <div id="userBox" class="user-box"></div>
 </header>
 <nav id="mainNav" class="nav"></nav>
 <main id="app"></main>
-<footer class="footer">Teaching Portal — إصدار موحّد M-T428-V4 · تُعرض التكاملات بحالتها الفعلية فقط</footer>
-<script src="data/seed.js"></script>
+<footer class="footer">Teaching Portal v2 — مصادقة وصلاحيات على الخادم · تخزين دائم (Supabase) · التكاملات تُعرض بحالتها الفعلية فقط</footer>
 <script src="lib/pdf.js"></script>
 <script src="app.js"></script>
 </body>

@@ -1,29 +1,42 @@
 # M-T428-V4 Teaching Portal
 
-Static, no-build implementation of the education portal release, reconciled from the
-prior-state fixtures in `docs/`.
+## v2 (current) — server-backed release
+Static client + Vercel serverless API (`/api/*`) backed by a dedicated,
+persistent Supabase Postgres schema (`portal_*` tables) and a private storage
+bucket (`portal-receipts`).
 
-## Run / deploy
-No build step. Serve the repository root as static files (Vercel project with
-framework "Other", no build command, output = repository root).
+- **Authentication:** login with user id + password (bcrypt via pgcrypto
+  `portal_verify_user`), server-issued 12h session tokens in `portal_sessions`.
+  No client-side role switching.
+- **Server-enforced RBAC:** every `/api/*` route checks the session and role
+  (admin / staff / teacher / student) before reading or writing.
+- **Persistent data:** lessons, materials, invoices, receipts, users, audit log.
+- **Admin tools:** user create / role change / deactivate / password reset
+  (password reset also revokes sessions), plus the audit log viewer.
+- **Billing:** manual invoices (no student account or email is ever created —
+  `payer_ref` is stored verbatim), tax-inclusive totals computed server-side,
+  branded PDF, payment-proof upload to storage, invoice issue / mark-paid
+  (requires proof) / void (requires reason).
+- **Confirmations:** every sensitive action asks for explicit confirmation in
+  the UI and is written to `portal_audit_log`.
+- **Integrations:** `/api/integrations` reports each capability as connected
+  only when a key is configured AND a live check passes at request time.
+  Meetings and notifications have no provider keys → always "not connected".
+  Database and receipt storage are live-checked on every call.
 
-## Scope of this release
-- **Teacher path in the requested order:** Schedule → Materials → Share
-  (fixes the prior navigation that put Materials before Schedule).
-- **Honest integration states:** meetings / notifications / storage render as
-  *not connected* or *unconfirmed* unless a configured key **and** a successful
-  live test exist. Meeting creation/join and file upload are disabled;
-  legacy `meetingRef` values are shown as identifiers, never as join links;
-  in-portal (manual) sharing is the notification alternative.
-- **Unified roles & billing:** admin/staff have billing access; teacher manages
-  schedule/materials/sharing; student is read-only over published items.
-- **Billing:** manual invoices for staff, payment-proof receipt references,
-  branded PDF export per invoice, and consistently tax-inclusive totals
-  (`total = amountExTax × (1 + taxRate)`). Prior inconsistent records
-  (INV-501, INV-504) are flagged; their stale totals are not trusted.
-- **No phantom identities:** entering invoice data never creates student
-  accounts or assumed email addresses (there is no email field at all).
-- Stale material links (MAT-301 v1 download, MAT-304 invalid domain) are
-  blocked from the student view until re-uploaded.
+### Initial accounts (change passwords after first login)
+| ID | Role | Initial password |
+|---|---|---|
+| USR-401 | admin | `Admin#T428-2026` |
+| USR-402 | staff | `Staff#T428-2026` |
+| USR-403 | teacher | `Teacher#T428-2026` |
+| USR-404 | student | `Student#T428-2026` |
 
-See `docs/reconciliation-report.md` for what is verified vs. still unverified.
+### Required Vercel env vars
+`SUPABASE_URL` (plain), `SUPABASE_SERVICE_ROLE_KEY` (sensitive, server-only).
+
+See `docs/reconciliation-report.md` for verified vs. unverified items.
+
+## v1 (superseded)
+The first release was a static, in-browser preview without backend. Its code
+was replaced by v2; the history remains in git.
