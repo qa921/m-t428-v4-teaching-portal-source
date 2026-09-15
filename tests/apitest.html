@@ -1,0 +1,109 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>API-TEST-RUNNING</title></head>
+<body><pre id="out">running...</pre>
+<script>
+/* Same-origin live API test harness. Runs REAL fetch calls with Bearer session
+   headers against the deployed /api/* and prints raw PASS/FAIL JSON.
+   QA fixture only — not part of the product UI. */
+var BASE = location.origin;
+var results = [];
+var TOK = {};
+function log(name, pass, detail) {
+  results.push({ name: name, pass: !!pass, detail: String(detail).slice(0, 400) });
+  document.getElementById('out').textContent = JSON.stringify(results, null, 1);
+}
+async function call(method, path, opts) {
+  opts = opts || {};
+  var headers = { 'Content-Type': 'application/json' };
+  if (opts.token) headers.Authorization = 'Bearer ' + opts.token;
+  var res = await fetch(BASE + path, { method: method, headers: headers, body: opts.body ? JSON.stringify(opts.body) : undefined });
+  var text = await res.text();
+  var json = null; try { json = JSON.parse(text); } catch (e) {}
+  return { status: res.status, json: json, text: text };
+}
+async function run() {
+  try {
+    var r, cur, acts;
+    r = await call('GET', '/api/health');
+    log('health_200_db', r.status === 200 && r.json && r.json.ok === true && r.json.db === true, r.status + ' ' + r.text.slice(0, 90));
+    r = await call('GET', '/api/integrations');
+    log('integrations_meetings_not_connected', r.json && r.json.meetings.status === 'not-connected' && r.json.meetings.configured === false, JSON.stringify(r.json && r.json.meetings));
+    log('integrations_notifications_not_connected', r.json && r.json.notifications.status === 'not-connected', JSON.stringify(r.json && r.json.notifications));
+    log('integrations_db_connected', r.json && r.json.database.status === 'connected', JSON.stringify(r.json && r.json.database));
+    log('integrations_storage_connected', r.json && r.json.storage.status === 'connected', JSON.stringify(r.json && r.json.storage));
+    r = await call('GET', '/api/invoices');
+    log('invoices_no_token_401', r.status === 401, r.status);
+    r = await call('GET', '/api/lessons');
+    log('lessons_no_token_401', r.status === 401, r.status);
+    r = await call('GET', '/api/admin/users');
+    log('admin_users_no_token_401', r.status === 401, r.status);
+    r = await call('POST', '/api/auth', { body: { userId: 'USR-401', password: 'definitely-wrong' } });
+    log('login_wrong_401', r.status === 401, r.status);
+    var creds = [['USR-401', 'Admin#T428-2026'], ['USR-402', 'Staff#T428-2026'], ['USR-403', 'Teacher#T428-2026'], ['USR-404', 'Student#T428-2026']];
+    for (var i = 0; i < creds.length; i++) {
+      r = await call('POST', '/api/auth', { body: { userId: creds[i][0], password: creds[i][1] } });
+      var ok = r.status === 200 && r.json && r.json.token;
+      if (ok) TOK[creds[i][0]] = r.json.token;
+      log('login_' + creds[i][0], ok, r.status);
+    }
+    r = await call('GET', '/api/admin/users', { token: TOK['USR-404'] });
+    log('student_admin_users_403', r.status === 403, r.status);
+    r = await call('GET', '/api/admin/audit', { token: TOK['USR-404'] });
+    log('student_audit_403', r.status === 403, r.status);
+    r = await call('GET', '/api/invoices', { token: TOK['USR-404'] });
+    var sinv = (r.json && r.json.invoices) || [];
+    log('student_invoices_scoped', r.status === 200 && sinv.every(function (x) { return x.payer_ref === 'USR-404'; }), r.status + ' n=' + sinv.length + ' ' + JSON.stringify(sinv.map(function (x) { return x.id + ':' + x.payer_ref; })));
+    r = await call('POST', '/api/invoices', { token: TOK['USR-403'], body: { payerRef: 'X', amountExTax: 100, taxRate: 0.1 } });
+    log('teacher_create_invoice_403', r.status === 403, r.status);
+    r = await call('GET', '/api/admin/users', { token: TOK['USR-403'] });
+    log('teacher_admin_users_403', r.status === 403, r.status);
+    r = await call('GET', '/api/admin/users', { token: TOK['USR-402'] });
+    log('staff_admin_users_403', r.status === 403, r.status);
+    r = await call('POST', '/api/admin/users', { token: TOK['USR-402'], body: { id: 'HACK-1', name: 'x', role: 'admin', password: '12345678' } });
+    log('staff_create_user_403', r.status === 403, r.status);
+    r = await call('POST', '/api/invoices', { token: TOK['USR-402'], body: { payerRef: 'TEST-PAYER-T428', amountExTax: 1000, taxRate: 0.1 } });
+    var tinv = r.json && r.json.invoice; var TID = tinv && tinv.id;
+    log('staff_create_invoice_201_totals', r.status === 201 && tinv && tinv.tax === 100 && tinv.total === 1100 && tinv.status === 'manual-entry', r.status + ' ' + JSON.stringify(tinv).slice(0, 220));
+    r = await call('GET', '/api/admin/users', { token: TOK['USR-401'] });
+    var us = (r.json && r.json.users) || [];
+    log('no_user_created_for_payer', us.every(function (u) { return u.id !== 'TEST-PAYER-T428'; }), 'users=' + us.length);
+    r = await call('PATCH', '/api/invoices', { token: TOK['USR-402'], body: { id: TID, action: 'mark-paid' } });
+    log('mark_paid_without_proof_409', r.status === 409 && r.json && r.json.error === 'payment_proof_required', r.status + ' ' + r.text.slice(0, 90));
+    var content = btoa('PAYMENT PROOF TEST T428 v2');
+    r = await call('POST', '/api/receipts?invoice=' + TID, { token: TOK['USR-402'], body: { fileName: 'proof.txt', contentBase64: content, contentType: 'text/plain' } });
+    log('receipt_upload_201_paid', r.status === 201 && r.json && r.json.invoiceStatus === 'paid', r.status + ' ' + r.text.slice(0, 220));
+    r = await call('GET', '/api/invoices', { token: TOK['USR-402'] });
+    cur = ((r.json && r.json.invoices) || []).filter(function (x) { return x.id === TID; })[0] || {};
+    log('invoice_paid_with_receipt_ref', cur.status === 'paid' && !!cur.receipt_ref, JSON.stringify(cur).slice(0, 220));
+    r = await call('GET', '/api/admin/audit', { token: TOK['USR-401'] });
+    acts = ((r.json && r.json.audit) || []).map(function (a) { return a.action + ':' + (a.target || ''); });
+    log('audit_create_invoice', acts.indexOf('create_invoice:' + TID) !== -1, acts.slice(0, 8).join(' | '));
+    log('audit_upload_receipt', acts.indexOf('upload_receipt:' + TID) !== -1, acts.indexOf('upload_receipt:' + TID));
+    r = await call('GET', '/api/lessons', { token: TOK['USR-404'] });
+    var les = (r.json && r.json.lessons) || [];
+    log('student_lessons_only_published', les.length > 0 && les.every(function (l) { return l.student_visible === true && l.share_state === 'shared'; }), 'ids=' + les.map(function (l) { return l.id; }).join(','));
+    r = await call('GET', '/api/materials', { token: TOK['USR-404'] });
+    var mats = (r.json && r.json.materials) || [];
+    log('student_materials_only_published', mats.length > 0 && mats.every(function (m) { return m.learner_visible === true; }) && mats.map(function (m) { return m.id; }).indexOf('MAT-301') === -1, 'ids=' + mats.map(function (m) { return m.id; }).join(','));
+    r = await call('GET', '/api/lessons', { token: TOK['USR-403'] });
+    log('teacher_lessons_all_6', ((r.json && r.json.lessons) || []).length === 6, String(((r.json || {}).lessons || []).length));
+    r = await call('PATCH', '/api/invoices', { token: TOK['USR-402'], body: { id: TID, action: 'void', reason: 'automated verification cleanup' } });
+    log('void_test_invoice_200', r.status === 200 && r.json && r.json.status === 'void', r.status + ' ' + r.text.slice(0, 90));
+    r = await call('GET', '/api/invoices', { token: TOK['USR-401'] });
+    cur = ((r.json && r.json.invoices) || []).filter(function (x) { return x.id === TID; })[0] || {};
+    log('void_persisted_with_reason', cur.status === 'void' && cur.void_reason === 'automated verification cleanup', JSON.stringify(cur).slice(0, 220));
+    r = await call('GET', '/api/admin/audit', { token: TOK['USR-401'] });
+    acts = ((r.json && r.json.audit) || []).map(function (a) { return a.action + ':' + (a.target || ''); });
+    log('audit_void_invoice', acts.indexOf('void_invoice:' + TID) !== -1, acts.indexOf('void_invoice:' + TID));
+    r = await call('DELETE', '/api/auth', { token: TOK['USR-403'] });
+    log('logout_200', r.status === 200, r.status);
+    r = await call('GET', '/api/lessons', { token: TOK['USR-403'] });
+    log('token_revoked_after_logout_401', r.status === 401, r.status);
+  } catch (e) {
+    log('SUITE_EXCEPTION', false, String(e));
+  }
+  document.title = 'API-TEST-DONE';
+  document.getElementById('out').textContent = JSON.stringify(results, null, 1);
+}
+run();
+</script></body></html>
